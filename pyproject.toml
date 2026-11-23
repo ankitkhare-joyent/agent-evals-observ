@@ -1,0 +1,45 @@
+[project]
+name = "agent-evals-observ"
+version = "0.1.0"
+description = "Evaluation and observability for the EC2-inventory agent: OpenTelemetry GenAI tracing, Langfuse, offline/online evals, OpenBao secrets"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    # --- telemetry: vendor-neutral OpenTelemetry, exported over OTLP to our Collector
+    "opentelemetry-api>=1.45",
+    "opentelemetry-sdk>=1.45",
+    "opentelemetry-exporter-otlp-proto-http>=1.45",
+    "opentelemetry-processor-baggage>=0.66b0",
+    "wrapt>=2.0",
+    # --- secrets: OpenBao speaks the Vault HTTP API, so the standard Vault client works unchanged
+    "hvac>=2.4",
+    # --- evals
+    "langfuse>=4.16",          # datasets, scores and experiment runs (tracing goes through OTel, not this SDK)
+    "pydantic>=2.11",
+    "pyyaml>=6.0",
+    "rich>=15.0",
+    # --- the agent under test (../learn-ai-agent) imports these; versions match its uv.lock
+    "anthropic>=0.125,<1",
+    "mcp>=1.24,<2",
+    "httpx>=0.28",
+    "langgraph>=1.2.12",
+    "langchain-core>=1.6",
+    "langchain-anthropic>=1.7",
+    "langchain-mcp-adapters>=0.3.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "pytest-asyncio>=1.2",
+    "ruff>=0.14",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

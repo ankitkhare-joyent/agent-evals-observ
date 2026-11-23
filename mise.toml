@@ -1,0 +1,84 @@
+# mise pins the toolchain and is the task runner for this project: `mise tasks` lists everything.
+[tools]
+python = "3.13.16"
+uv = "0.12.22"
+
+[env]
+# Nothing secret lives here. Secrets are in OpenBao; .env only holds the seed value for the Anthropic key.
+_.python.venv = { path = ".venv", create = true }
+EVALS_BAO_ADDR = "http://127.0.0.1:38200"
+OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:34318"
+OTEL_SERVICE_NAME = "ec2-inventory-agent"
+# The sibling project whose agent we evaluate and trace. Read-only: we import it, never change it.
+AGENT_SRC = "{{config_root}}/../learn-ai-agent"
+INVENTORY_API_URL = "http://localhost:8000"
+MCP_URL = "http://localhost:8001/mcp"
+LANGFUSE_HOST = "http://localhost:33000"
+
+[tasks.setup]
+description = "Install Python deps and generate local OpenBao bootstrap material (.bao/)"
+run = ["uv sync --locked", "bash scripts/bootstrap.sh"]
+
+[tasks.up]
+description = "Start OpenBao, seed secrets, then start Collector + Langfuse + Prometheus"
+run = [
+  "docker compose up -d --wait openbao",
+  "uv run python -m scripts.bao_seed",
+  "docker compose up -d --wait",
+]
+
+[tasks.agent-up]
+description = "Start the agent under test (the learn-ai-agent lakehouse + API + MCP server), unchanged"
+run = "docker compose -f ../learn-ai-agent/compose.yaml up -d --wait api mcp"
+
+[tasks.agent-down]
+description = "Stop the agent's lakehouse stack"
+run = "docker compose -f ../learn-ai-agent/compose.yaml stop"
+
+[tasks.langfuse-login]
+description = "Show the Langfuse UI login (read from OpenBao)"
+run = "uv run python -m scripts.langfuse_login"
+
+[tasks.down]
+description = "Stop the stack (data volumes are kept)"
+run = "docker compose down"
+
+[tasks.reset]
+description = "DELETE this stack's data and OpenBao key material (.bao/). ./.env and ../learn-ai-agent are untouched"
+run = ["docker compose down -v --remove-orphans", "rm -rf .bao reports"]
+
+[tasks."lab:span"]
+description = "Labs 02-04: send one hand-made span (with a fake API key in it) through the Collector"
+run = "uv run python -m lab.send_span"
+
+[tasks."lab:judge"]
+description = "Lab 08: run the LLM judge once on an answer you choose (about 1 cent)"
+run = "uv run python -m lab.judge_once"
+
+[tasks.import-key]
+description = "Store ANTHROPIC_API_KEY from ./.env in OpenBao (never printed)"
+run = "uv run python -m scripts.import_anthropic_key"
+
+[tasks.trace]
+description = "Run the agent once with tracing on: mise run trace -- 'your question'"
+run = "uv run python -m observ.run_traced"
+
+[tasks.eval]
+description = "Offline eval suite against the live agent (writes reports/, pushes scores to Langfuse)"
+run = "uv run python -m evals.run"
+
+[tasks.online-eval]
+description = "Score recent production traces in Langfuse with the LLM judge"
+run = "uv run python -m evals.online"
+
+[tasks.test]
+description = "Unit tests for graders and instrumentation (no network, no API key)"
+run = "uv run pytest -q"
+
+[tasks.calibrate]
+description = "Judge calibration: `export reports/<run>` then label, then `compare evals/labels/<run>.yaml`"
+run = "uv run python -m evals.calibrate_judge"
+
+[tasks.demo-dynamic-creds]
+description = "OpenBao dynamic secrets: a 1-hour read-only Postgres user, created and revoked on demand"
+run = "uv run python -m scripts.demo_dynamic_db_creds"

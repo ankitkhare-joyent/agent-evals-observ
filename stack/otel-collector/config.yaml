@@ -1,0 +1,134 @@
+# OpenTelemetry Collector: the one place every span and metric passes through.
+# docs/04-collector-pipeline.md explains each block and why it sits in this order.
+#
+#   app (OTLP) --> [traces/ingest] --redact, cap sizes--> spanmetrics --> [metrics] --> Prometheus
+#                                                     \-> forward ----> [traces/store] --tail-sample--> Langfuse
+#
+# Apps only ever know "send OTLP to the collector". Which backends exist, which keys they need, what
+# gets redacted or sampled, all lives here, so swapping Langfuse for something else is a config change.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317 }
+      http: { endpoint: 0.0.0.0:4318 }
+
+processors:
+  # First in every pipeline: refuse data instead of being OOM-killed when a burst arrives.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+  # Defence in depth for secrets and PII that end up in prompts, tool arguments or tool results.
+  # Matching substrings are masked before anything leaves this box; the span keeps every attribute.
+  redaction:
+    allow_all_keys: true
+    blocked_values:
+      - "sk-ant-[A-Za-z0-9_\\-]{20,}"        # Anthropic API keys
+      - "sk-lf-[0-9a-f\\-]{20,}"             # Langfuse secret keys
+      - "AKIA[0-9A-Z]{16}"                   # AWS access key IDs
+      - "(?i)bearer [A-Za-z0-9_\\-\\.=]{20,}" # bearer tokens (JWTs) copied into payloads
+    summary: info
+
+  # Cap attribute sizes so one huge tool result cannot blow the backend's field limit.
+  transform/cap-sizes:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - truncate_all(span.attributes, 131072)
+
+  # Tail sampling decides per *trace*, after it has seen all of its spans. Keep every failure, every slow
+  # run and every eval run; sample the rest. Locally we keep 100% so you see everything; in production the
+  # last policy is typically 5-20%.
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 20000
+    policies:
+      - name: errors
+        type: status_code
+        status_code: { status_codes: [ERROR] }
+      - name: slow-agent-runs
+        type: latency
+        latency: { threshold_ms: 30000 }
+      - name: eval-runs
+        type: string_attribute
+        string_attribute: { key: langfuse.environment, values: [eval] }
+      - name: everything-else
+        type: probabilistic
+        probabilistic: { sampling_percentage: 100 }
+
+  batch:
+    send_batch_size: 512
+    timeout: 2s
+
+connectors:
+  # RED metrics (rate, errors, duration) derived from spans, *before* sampling, so they stay exact.
+  spanmetrics:
+    namespace: agent
+    metrics_flush_interval: 15s      # default is 60s: metrics would lag traces by up to a minute
+    histogram:
+      explicit:
+        buckets: [100ms, 250ms, 500ms, 1s, 2s, 5s, 10s, 20s, 40s, 80s]
+    dimensions:
+      - name: gen_ai.operation.name
+      - name: gen_ai.request.model
+      - name: gen_ai.tool.name
+      - name: gen_ai.agent.name
+      - name: error.type
+    exemplars:
+      enabled: true
+  forward/store: {}
+
+exporters:
+  otlphttp/langfuse:
+    endpoint: http://langfuse-web:3000/api/public/otel
+    headers:
+      # Rendered by the OpenBao Agent sidecar into a tmpfs volume; never in this file or in git.
+      Authorization: ${file:/secrets/langfuse_otlp_authorization}
+      x-langfuse-ingestion-version: "4"
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 2000
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs: { level: info }
+    # The Collector's own metrics (accepted / refused / sent spans per component), published for the labs
+    # on 127.0.0.1:38888/metrics. In production Prometheus scrapes this to alert on dropped telemetry.
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus: { host: 0.0.0.0, port: 8888 }
+  pipelines:
+    traces/ingest:
+      receivers: [otlp]
+      processors: [memory_limiter, redaction, transform/cap-sizes]
+      exporters: [spanmetrics, forward/store]
+    traces/store:
+      receivers: [forward/store]
+      processors: [tail_sampling, batch]
+      exporters: [otlphttp/langfuse]
+    metrics:
+      receivers: [otlp, spanmetrics]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

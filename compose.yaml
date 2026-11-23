@@ -1,0 +1,251 @@
+# Agent observability + evaluation stack.
+#
+#   agent / eval runner (host) --OTLP--> otel-collector --OTLP/HTTP--> langfuse-web --> worker --> ClickHouse
+#                                             |                                         Postgres, Redis, MinIO
+#                                             +--> Prometheus (RED metrics, token burn)
+#
+#   openbao: every secret below lives here. Two OpenBao Agent sidecars log in with their own AppRole
+#   and render secrets into tmpfs volumes; no password is written in this file or in git.
+#
+# Start order is handled by `mise run up` (OpenBao first, seed secrets, then everything else).
+# Memory: limits sum to ~6 GB, real use is ~2.5 GB. `mise run down` when you're done.
+name: agent-observ
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  # ------------------------------------------------------------------ secrets
+  openbao:
+    image: openbao/openbao:2.7.1
+    <<: *restart
+    command: ["server"]
+    ports: ["127.0.0.1:38200:8200"]       # API + UI: http://localhost:38200/ui
+    volumes:
+      - ./stack/openbao/config.hcl:/openbao/config/config.hcl:ro
+      - ./stack/openbao/policies:/openbao/policies:ro
+      - ./.bao/bootstrap:/openbao/bootstrap:ro      # static unseal key + first admin password (gitignored)
+      - bao-data:/openbao/file
+    healthcheck:
+      # 200 only when initialized, unsealed and active
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8200/v1/sys/health || exit 1"]
+      interval: 3s
+      retries: 40
+    mem_limit: 256m
+
+  bao-agent-langfuse:
+    image: openbao/openbao:2.7.1
+    <<: *restart
+    command: ["agent", "-config=/openbao/agent.hcl"]
+    environment: { SKIP_CHOWN: "true" }
+    volumes:
+      - ./stack/openbao/agent/langfuse-infra.hcl:/openbao/agent.hcl:ro
+      - ./stack/openbao/templates:/openbao/templates:ro
+      - ./.bao/approle/langfuse-infra:/openbao/approle:ro
+      - langfuse-secrets:/secrets
+    depends_on:
+      openbao: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /secrets/langfuse.env && test -s /secrets/redis.conf && test -s /secrets/minio_password"]
+      interval: 2s
+      retries: 30
+    mem_limit: 64m
+
+  bao-agent-collector:
+    image: openbao/openbao:2.7.1
+    <<: *restart
+    command: ["agent", "-config=/openbao/agent.hcl"]
+    environment: { SKIP_CHOWN: "true" }
+    volumes:
+      - ./stack/openbao/agent/otel-collector.hcl:/openbao/agent.hcl:ro
+      - ./.bao/approle/otel-collector:/openbao/approle:ro
+      - collector-secrets:/secrets
+    depends_on:
+      openbao: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /secrets/langfuse_otlp_authorization"]
+      interval: 2s
+      retries: 30
+    mem_limit: 64m
+
+  # ------------------------------------------------------------------ telemetry pipeline
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    <<: *restart
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "127.0.0.1:34317:4317"   # OTLP gRPC
+      - "127.0.0.1:34318:4318"   # OTLP HTTP  <- the agent and eval runner send here
+      - "127.0.0.1:34133:13133"  # health check
+      - "127.0.0.1:38888:8888"   # the Collector's own metrics
+    volumes:
+      - ./stack/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+      - collector-secrets:/secrets:ro
+    depends_on:
+      bao-agent-collector: { condition: service_healthy }
+      langfuse-web: { condition: service_started }
+    mem_limit: 256m
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    <<: *restart
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
+    ports: ["127.0.0.1:39095:9090"]       # http://localhost:39095
+    volumes:
+      - ./stack/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./stack/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - prom-data:/prometheus
+    mem_limit: 384m
+
+  # ------------------------------------------------------------------ Langfuse (traces, evals, datasets)
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    <<: *restart
+    # Load secrets rendered by the sidecar, then hand over to the image's own entrypoint (migrations + server).
+    entrypoint: ["dumb-init", "--", "sh", "-c", "set -a && . /secrets/langfuse.env && set +a && exec ./web/entrypoint.sh \"$@\"", "--"]
+    command: ["node", "./web/server.js", "--keepAliveTimeout", "110000"]
+    ports: ["127.0.0.1:33000:3000"]       # http://localhost:33000
+    environment: &langfuse-env
+      NEXTAUTH_URL: http://localhost:33000
+      TELEMETRY_ENABLED: "false"
+      NODE_OPTIONS: --max-old-space-size=1024
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+      LANGFUSE_S3_BATCH_EXPORT_BUCKET: langfuse
+      LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
+      # Headless first start: org, project and user are created from these (keys and password come from OpenBao).
+      LANGFUSE_INIT_ORG_ID: platform
+      LANGFUSE_INIT_ORG_NAME: Platform Team
+      LANGFUSE_INIT_PROJECT_ID: ec2-agent
+      LANGFUSE_INIT_PROJECT_NAME: EC2 Inventory Agent
+      LANGFUSE_INIT_USER_EMAIL: ankit@langfuse.local
+      LANGFUSE_INIT_USER_NAME: Ankit
+    volumes:
+      - langfuse-secrets:/secrets:ro
+    depends_on: &langfuse-deps
+      bao-agent-langfuse: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://$(hostname -i):3000/api/public/health || exit 1"]
+      interval: 5s
+      start_period: 60s
+      retries: 180          # first start runs ~100 Postgres + ClickHouse migrations; give it up to 15 min
+    mem_limit: 1536m
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    <<: *restart
+    entrypoint: ["dumb-init", "--", "sh", "-c", "set -a && . /secrets/langfuse.env && set +a && exec ./worker/entrypoint.sh \"$@\"", "--"]
+    command: ["node", "worker/dist/index.js"]
+    environment: *langfuse-env
+    volumes:
+      - langfuse-secrets:/secrets:ro
+    depends_on: *langfuse-deps
+    mem_limit: 1536m
+
+  postgres:
+    image: postgres:17-alpine
+    <<: *restart
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /secrets/postgres_password
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - lf-pg-data:/var/lib/postgresql/data
+      - langfuse-secrets:/secrets:ro
+    depends_on:
+      bao-agent-langfuse: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
+    mem_limit: 384m
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    <<: *restart
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD_FILE: /secrets/clickhouse_password
+    volumes:
+      - lf-ch-data:/var/lib/clickhouse
+      - lf-ch-logs:/var/log/clickhouse-server
+      - ./stack/clickhouse/low-resources.xml:/etc/clickhouse-server/config.d/low-resources.xml:ro
+      - langfuse-secrets:/secrets:ro
+    depends_on:
+      bao-agent-langfuse: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      retries: 20
+    mem_limit: 1536m
+
+  redis:
+    image: redis:7-alpine
+    <<: *restart
+    command: ["redis-server", "/secrets/redis.conf"]
+    volumes:
+      - lf-redis-data:/data
+      - langfuse-secrets:/secrets:ro
+    depends_on:
+      bao-agent-langfuse: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$(sed -n 's/^requirepass //p' /secrets/redis.conf) redis-cli ping | grep -q PONG"]
+      interval: 3s
+      retries: 20
+    mem_limit: 256m
+
+  minio:
+    image: cgr.dev/chainguard/minio
+    <<: *restart
+    entrypoint: ["sh", "-c", "export MINIO_ROOT_USER=minio MINIO_ROOT_PASSWORD=\"$$(cat /secrets/minio_password)\" && mkdir -p /data/langfuse && exec minio server --address :9000 --console-address :9001 /data"]
+    volumes:
+      - lf-minio-data:/data
+      - langfuse-secrets:/secrets:ro
+    depends_on:
+      bao-agent-langfuse: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      retries: 30
+    mem_limit: 384m
+
+volumes:
+  bao-data:
+  prom-data:
+  lf-pg-data:
+  lf-ch-data:
+  lf-ch-logs:
+  lf-redis-data:
+  lf-minio-data:
+  # Secrets rendered by the sidecars live in memory only (tmpfs), like a Kubernetes emptyDir{medium: Memory}.
+  langfuse-secrets:
+    driver_opts: { type: tmpfs, device: tmpfs, o: "size=1m,uid=100,gid=1000,mode=0755" }
+  collector-secrets:
+    driver_opts: { type: tmpfs, device: tmpfs, o: "size=1m,uid=100,gid=1000,mode=0755" }

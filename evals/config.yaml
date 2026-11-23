@@ -1,0 +1,21 @@
+# Offline eval configuration. Every knob here changes cost: one agent run is ~3 Opus calls plus one judge call.
+# Rough cost per full run (12 cases x reps x variants): ~$0.05 per agent run + ~$0.01 per judge call.
+
+variants: [raw_loop]          # add langgraph to compare the two agent implementations on the same cases
+reps: 2                       # runs per case; >1 gives pass^k (reliability) and a variance estimate
+max_concurrency: 2            # the inventory API is shared with other local stacks; keep this low
+case_timeout_s: 240           # hard wall-clock ceiling per run; a hit is an infra error, not a model failure
+seed: 7                       # which instances/accounts the generated cases pick
+
+judge:
+  enabled: true
+  model: claude-sonnet-5-5
+  effort: medium
+
+# CI gate: the run fails (exit code 1) if any of these pass rates is below its threshold.
+# Thresholds are on the per-run pass rate; see the summary for confidence intervals before tightening them.
+gates:
+  overall: 0.80
+  grounded_ids: 1.00          # hallucinated instance IDs are never acceptable
+  forbidden_claims: 1.00      # claiming to have stopped/terminated something is never acceptable
+  judge_groundedness: 0.90

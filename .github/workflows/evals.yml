@@ -1,0 +1,52 @@
+# Example CI wiring for the eval suite (a teaching file: this repo has no remote CI).
+#
+# The pattern: unit tests for graders on every push (free), the paid eval suite on PRs that touch the
+# agent, its prompts or its tools, and a gate that fails the PR on regression.
+#
+# Secrets: no long-lived keys in GitHub. The job gets a short-lived GitHub OIDC token, exchanges it at
+# OpenBao's `jwt` auth method for a 15-minute token bound to the eval-runner policy (the role only trusts
+# this repo + branch), and reads the Anthropic and Langfuse keys from there.
+name: agent-evals
+
+on:
+  push:
+  pull_request:
+    paths: ["agents/**", "mcp_server/**", "evals/**", "observ/**"]
+
+permissions:
+  contents: read
+  id-token: write          # lets the job request a GitHub OIDC token for OpenBao
+
+jobs:
+  grader-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+      - run: uv sync --locked && uv run pytest -q
+
+  offline-evals:
+    if: github.event_name == 'pull_request'
+    needs: grader-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+      - name: Read secrets from OpenBao with GitHub OIDC (no stored keys)
+        uses: hashicorp/vault-action@v3      # works against OpenBao: same API
+        with:
+          url: ${{ vars.OPENBAO_ADDR }}
+          method: jwt
+          role: eval-runner-ci
+          secrets: |
+            secret/data/evals/anthropic api_key | ANTHROPIC_API_KEY ;
+            secret/data/langfuse/api public_key | LANGFUSE_PUBLIC_KEY ;
+            secret/data/langfuse/api secret_key | LANGFUSE_SECRET_KEY
+      - name: Run evals (exit 1 on gate failure)
+        run: uv run python -m evals.run --reps 3
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ vars.OTEL_COLLECTOR_URL }}
+          LANGFUSE_HOST: ${{ vars.LANGFUSE_HOST }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: eval-report, path: reports/ }

@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Evals Architecture</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --ink: #1d1d1f; --muted: #5f6368; --line: #8a8f98;
+    --agent: #e8f0fe; --agent-b: #4a6fd1;
+    --ours: #e7f5ec; --ours-b: #2f8a55;
+    --otel: #fff4e0; --otel-b: #c27a12;
+    --lf: #f3eafc; --lf-b: #7d4bb5;
+    --bao: #fdecec; --bao-b: #c0392b;
+    --box: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16171a; --ink: #ececf0; --muted: #a3a7ae; --line: #8d929b;
+      --agent: #1b2640; --agent-b: #7c9bf0; --ours: #15291e; --ours-b: #5cc38a;
+      --otel: #2e2412; --otel-b: #e3a443; --lf: #261a33; --lf-b: #b28be0;
+      --bao: #331a1a; --bao-b: #ee7b6e; --box: #202227;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16171a; --ink: #ececf0; --muted: #a3a7ae; --line: #8d929b;
+    --agent: #1b2640; --agent-b: #7c9bf0; --ours: #15291e; --ours-b: #5cc38a;
+    --otel: #2e2412; --otel-b: #e3a443; --lf: #261a33; --lf-b: #b28be0;
+    --bao: #331a1a; --bao-b: #ee7b6e; --box: #202227;
+  }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1480px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 18px; }
+  .scroll { overflow-x: auto; }
+  svg { width: 100%; min-width: 1100px; height: auto; display: block; }
+  svg text { fill: var(--ink); font-family: inherit; }
+  .t  { font-size: 13px; }
+  .ts { font-size: 11.5px; fill: var(--muted); }
+  .th { font-size: 15px; font-weight: 650; }
+  .tl { font-size: 11px; fill: var(--muted); font-style: italic; }
+  .box { fill: var(--box); stroke: var(--line); stroke-width: 1; rx: 8; }
+  .g-agent { fill: var(--agent); stroke: var(--agent-b); }
+  .g-ours  { fill: var(--ours);  stroke: var(--ours-b); }
+  .g-otel  { fill: var(--otel);  stroke: var(--otel-b); }
+  .g-lf    { fill: var(--lf);    stroke: var(--lf-b); }
+  .g-bao   { fill: var(--bao);   stroke: var(--bao-b); }
+  .grp { stroke-width: 1.5; rx: 14; }
+  .a  { stroke: var(--line); stroke-width: 1.6; fill: none; marker-end: url(#arr); }
+  .a-tel { stroke: var(--otel-b); stroke-width: 2.2; fill: none; marker-end: url(#arr-tel); }
+  .a-sec { stroke: var(--bao-b); stroke-width: 1.6; fill: none; stroke-dasharray: 6 4; marker-end: url(#arr-sec); }
+  .a-ev  { stroke: var(--ours-b); stroke-width: 1.8; fill: none; stroke-dasharray: 2 4; marker-end: url(#arr-ev); }
+  .legend { display: flex; flex-wrap: wrap; gap: 18px; margin: 14px 0 22px; color: var(--muted); font-size: 13px; }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .legend i { display: inline-block; width: 34px; border-top: 2px solid; }
+  ol { padding-left: 20px; } li { margin: 6px 0; }
+  code { font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Agent evals and observability: the whole system</h1>
+<p class="sub">Everything built in agent-evals-observ, around the unchanged EC2-inventory agent from learn-ai-agent. Numbers in circles match the walkthrough below.</p>
+
+<div class="legend">
+  <span><i style="border-color: var(--line)"></i>agent requests</span>
+  <span><i style="border-color: var(--otel-b)"></i>telemetry (OTLP)</span>
+  <span><i style="border-color: var(--ours-b); border-top-style: dotted"></i>evaluation (datasets, scores, judging)</span>
+  <span><i style="border-color: var(--bao-b); border-top-style: dashed"></i>secrets delivery</span>
+</div>
+
+<div class="scroll">
+<svg viewBox="0 0 1440 965" role="img" aria-label="Architecture diagram of agent tracing, evaluation and secrets">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker>
+    <marker id="arr-tel" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--otel-b)"/></marker>
+    <marker id="arr-sec" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--bao-b)"/></marker>
+    <marker id="arr-ev" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--ours-b)"/></marker>
+  </defs>
+
+  <!-- Claude API, shared by the agent and the judge -->
+  <rect class="box" x="14" y="14" width="706" height="48"/>
+  <text class="t" x="30" y="43" font-weight="600">Claude API</text>
+  <text class="ts" x="120" y="43">agent: claude-opus-5-5 (tool use, prompt cache) · judge: claude-sonnet-5-5 (structured output)</text>
+
+  <!-- ============ A: agent under test ============ -->
+  <rect class="grp g-agent" x="14" y="80" width="330" height="530"/>
+  <text class="th" x="30" y="106">Agent under test</text>
+  <text class="ts" x="30" y="124">../learn-ai-agent · imported, never edited</text>
+
+  <rect class="box" x="34" y="144" width="290" height="70"/>
+  <text class="t" x="48" y="168" font-weight="600">EC2 inventory agent</text>
+  <text class="ts" x="48" y="186">raw loop  |  LangGraph state machine</text>
+  <text class="ts" x="48" y="203">runs inside the eval / trace process</text>
+
+  <rect class="box" x="34" y="246" width="290" height="60"/>
+  <text class="t" x="48" y="268" font-weight="600">MCP server :8001</text>
+  <text class="ts" x="48" y="286">4 read-only tools · OAuth · token exchange</text>
+  <text class="ts" x="48" y="301">trace context arrives in params._meta</text>
+
+  <rect class="box" x="34" y="338" width="290" height="52"/>
+  <text class="t" x="48" y="360" font-weight="600">REST API :8000</text>
+  <text class="ts" x="48" y="378">FastAPI + DuckDB hot cache</text>
+
+  <rect class="box" x="34" y="420" width="290" height="52"/>
+  <text class="t" x="48" y="442" font-weight="600">Iceberg lakehouse</text>
+  <text class="ts" x="48" y="460">Lakekeeper catalog · SeaweedFS (S3)</text>
+
+  <rect class="box" x="34" y="504" width="290" height="62"/>
+  <text class="t" x="48" y="526" font-weight="600">Lakehouse OpenBao :8200</text>
+  <text class="ts" x="48" y="544">the agent's own API login lives here,</text>
+  <text class="ts" x="48" y="559">not copied into this project</text>
+
+  <path class="a" d="M290,144 L290,62"/>
+  <text class="tl" x="296" y="134">HTTPS</text>
+  <path class="a" d="M179,214 L179,246"/>
+  <text class="tl" x="186" y="235">MCP over HTTP</text>
+  <path class="a" d="M179,306 L179,338"/>
+  <path class="a" d="M179,390 L179,420"/>
+  <path class="a" d="M60,214 C22,250 22,470 60,504"/>
+  <text class="tl" x="20" y="430" transform="rotate(-90 20 430)">agent login</text>
+
+  <!-- ============ B: this project ============ -->
+  <rect class="grp g-ours" x="370" y="80" width="350" height="530"/>
+  <text class="th" x="386" y="106">This project (host processes)</text>
+  <text class="ts" x="386" y="124">observ/ · evals/ · run with mise</text>
+
+  <rect class="box" x="390" y="144" width="310" height="92"/>
+  <text class="t" x="404" y="166" font-weight="600">① GenAI instrumentation</text>
+  <text class="ts" x="404" y="184">wrapt patches the anthropic + mcp clients</text>
+  <text class="ts" x="404" y="200">spans: invoke_agent › chat · tools/call</text>
+  <text class="ts" x="404" y="216">tokens · cost · errors · metrics · baggage</text>
+  <text class="ts" x="404" y="230">OTel SDK → batch → OTLP exporter</text>
+  <path class="a" d="M390,180 L324,180"/>
+  <text class="tl" x="333" y="172">patches</text>
+
+  <rect class="box" x="390" y="262" width="310" height="160"/>
+  <text class="t" x="404" y="284" font-weight="600">② Offline eval runner  (mise run eval)</text>
+  <text class="ts" x="404" y="304">oracle: deterministic MCP calls → golden cases</text>
+  <text class="ts" x="404" y="320">11 cases × k reps × variants, timeout per run</text>
+  <text class="ts" x="404" y="336">trajectory rebuilt from in-memory spans</text>
+  <text class="ts" x="404" y="352">code graders: facts · grounded IDs · tools</text>
+  <text class="ts" x="404" y="368">LLM judge: 3 binary criteria</text>
+  <text class="ts" x="404" y="384">infra / stale-ground-truth errors not scored</text>
+  <text class="ts" x="404" y="400">reports: summary.md · junit.xml · results</text>
+  <text class="ts" x="404" y="415">exit 1 on gate failure → CI</text>
+
+  <rect class="box" x="390" y="446" width="310" height="70"/>
+  <text class="t" x="404" y="468" font-weight="600">③ Online evaluator  (scheduled)</text>
+  <text class="ts" x="404" y="486">samples real traces · reference-free judge</text>
+  <text class="ts" x="404" y="502">writes online_* scores back to the trace</text>
+
+  <rect class="box" x="390" y="540" width="310" height="52"/>
+  <text class="t" x="404" y="562" font-weight="600">Judge calibration</text>
+  <text class="ts" x="404" y="580">your labels vs the judge: agreement, kappa</text>
+
+  <path class="a" d="M700,370 L710,370 L710,62"/>
+  <path class="a" d="M700,480 L710,480 L710,372" style="marker-end:none"/>
+  <text class="tl" x="716" y="300" transform="rotate(-90 716 300)">judge calls</text>
+
+  <!-- ============ C: Collector ============ -->
+  <rect class="grp g-otel" x="746" y="80" width="300" height="530"/>
+  <text class="th" x="762" y="106">④ OTel Collector :34318</text>
+  <text class="ts" x="762" y="124">all telemetry passes through here</text>
+
+  <rect class="box" x="766" y="146" width="260" height="40"/><text class="t" x="780" y="171">otlp receiver (HTTP / gRPC)</text>
+  <rect class="box" x="766" y="198" width="260" height="40"/><text class="t" x="780" y="223">memory_limiter</text>
+  <rect class="box" x="766" y="250" width="260" height="52"/><text class="t" x="780" y="271">redaction</text><text class="ts" x="780" y="289">masks sk-ant-, sk-lf-, AKIA…, bearer</text>
+  <rect class="box" x="766" y="314" width="260" height="40"/><text class="t" x="780" y="339">transform: cap attribute size</text>
+  <rect class="box" x="766" y="380" width="120" height="58"/><text class="t" x="776" y="402">spanmetrics</text><text class="ts" x="776" y="420">RED, unsampled</text>
+  <rect class="box" x="906" y="380" width="120" height="58"/><text class="t" x="916" y="402">tail_sampling</text><text class="ts" x="916" y="420">keep errors, slow</text>
+  <rect class="box" x="766" y="458" width="120" height="58"/><text class="t" x="776" y="480">prometheus</text><text class="ts" x="776" y="498">exporter :8889</text>
+  <rect class="box" x="906" y="458" width="120" height="58"/><text class="t" x="916" y="480">otlphttp</text><text class="ts" x="916" y="498">Basic auth file</text>
+  <rect class="box" x="766" y="536" width="260" height="62"/>
+  <text class="t" x="780" y="556" font-weight="600">Prometheus :39095</text>
+  <text class="ts" x="780" y="573">agent_calls_total · gen_ai_client_token_usage</text>
+  <text class="ts" x="780" y="589">alerts: tool errors · p95 latency · token burn</text>
+
+  <path class="a" d="M896,186 L896,198"/>
+  <path class="a" d="M896,238 L896,250"/>
+  <path class="a" d="M896,302 L896,314"/>
+  <path class="a" d="M860,354 L826,380"/>
+  <path class="a" d="M930,354 L966,380"/>
+  <path class="a" d="M826,438 L826,458"/>
+  <path class="a" d="M966,438 L966,458"/>
+  <path class="a" d="M826,516 L826,536"/>
+
+  <path class="a-tel" d="M700,190 C732,190 736,166 766,166"/>
+  <text class="tl" x="722" y="150">OTLP</text>
+
+  <!-- ============ D: Langfuse ============ -->
+  <rect class="grp g-lf" x="1072" y="80" width="354" height="530"/>
+  <text class="th" x="1088" y="106">⑤ Langfuse v4 :33000</text>
+  <text class="ts" x="1088" y="124">MIT · traces · datasets · experiments · scores</text>
+
+  <rect class="box" x="1092" y="144" width="314" height="70"/>
+  <text class="t" x="1106" y="166" font-weight="600">langfuse-web</text>
+  <text class="ts" x="1106" y="184">UI · public API · /api/public/otel ingest</text>
+  <text class="ts" x="1106" y="200">maps gen_ai.* and langfuse.experiment.*</text>
+
+  <rect class="box" x="1092" y="240" width="148" height="58"/><text class="t" x="1104" y="262">MinIO (S3)</text><text class="ts" x="1104" y="280">raw event log</text>
+  <rect class="box" x="1258" y="240" width="148" height="58"/><text class="t" x="1270" y="262">Redis</text><text class="ts" x="1270" y="280">job queue</text>
+
+  <rect class="box" x="1092" y="324" width="314" height="52"/>
+  <text class="t" x="1106" y="346" font-weight="600">langfuse-worker</text>
+  <text class="ts" x="1106" y="364">builds observations · costs · evaluators</text>
+
+  <rect class="box" x="1092" y="402" width="314" height="58"/>
+  <text class="t" x="1106" y="424" font-weight="600">ClickHouse</text>
+  <text class="ts" x="1106" y="442">traces · observations · scores (OLAP)</text>
+
+  <rect class="box" x="1092" y="486" width="314" height="58"/>
+  <text class="t" x="1106" y="508" font-weight="600">Postgres</text>
+  <text class="ts" x="1106" y="526">projects · API keys · datasets · prompts</text>
+
+  <path class="a" d="M1166,214 L1166,240"/>
+  <path class="a" d="M1332,214 L1332,240"/>
+  <path class="a" d="M1166,298 L1166,324"/>
+  <path class="a" d="M1332,298 L1332,324"/>
+  <path class="a" d="M1249,376 L1249,402"/>
+  <path class="a" d="M1406,190 C1420,300 1420,440 1406,515"/>
+
+  <path class="a-tel" d="M1026,487 C1058,487 1056,180 1092,180"/>
+  <text class="tl" x="1064" y="380" transform="rotate(-90 1064 380)">OTLP + Basic auth</text>
+
+  <!-- evaluation API traffic, routed under the groups -->
+  <path class="a-ev" d="M700,400 C726,400 726,632 760,632" />
+  <path class="a-ev" d="M700,500 C722,500 722,632 760,632 L1240,632 L1240,614"/>
+  <text class="tl" x="770" y="650">public API: datasets · experiments · scores · read traces</text>
+
+  <!-- ============ E: OpenBao ============ -->
+  <rect class="grp g-bao" x="14" y="664" width="1412" height="290"/>
+  <text class="th" x="30" y="692">⑥ OpenBao 2.7 :38200  ·  MPL-2.0 fork of Vault · this project's secrets</text>
+
+  <rect class="box" x="34" y="712" width="296" height="222"/>
+  <text class="t" x="48" y="734" font-weight="600">Server</text>
+  <text class="ts" x="48" y="754">Raft storage · static-key auto-unseal</text>
+  <text class="ts" x="48" y="770">self-initialized; root token revoked</text>
+  <text class="ts" x="48" y="786">audit device → stdout</text>
+  <text class="ts" x="48" y="806">KV v2: langfuse/infra · langfuse/otlp</text>
+  <text class="ts" x="48" y="822">          langfuse/api · evals/anthropic</text>
+  <text class="ts" x="48" y="842">auth: userpass admin · AppRole × 3</text>
+  <text class="ts" x="48" y="858">one narrow policy per workload</text>
+  <text class="ts" x="48" y="878">database engine: 1-hour read-only</text>
+  <text class="ts" x="48" y="894">Postgres users, revoked on demand</text>
+  <text class="ts" x="48" y="914">bootstrap: .bao/ unseal key + admin pw</text>
+
+  <path class="a-sec" d="M330,740 L352,740 L352,702 L1180,702" style="marker-end:none"/>
+  <path class="a-sec" d="M430,702 L430,724"/>
+  <path class="a-sec" d="M800,702 L800,724"/>
+  <path class="a-sec" d="M1130,702 L1130,724"/>
+
+  <rect class="box" x="390" y="724" width="310" height="110"/>
+  <text class="t" x="404" y="746" font-weight="600">eval-runner identity (in-process)</text>
+  <text class="ts" x="404" y="764">AppRole login (hvac) → Anthropic key +</text>
+  <text class="ts" x="404" y="780">Langfuse key into process env → token revoked</text>
+  <text class="ts" x="404" y="796">seed: ./.env → secret/evals/anthropic</text>
+  <text class="ts" x="404" y="812">CI: GitHub OIDC → jwt auth, no stored keys</text>
+
+  <rect class="box" x="766" y="724" width="260" height="110"/>
+  <text class="t" x="780" y="746" font-weight="600">bao-agent-collector</text>
+  <text class="ts" x="780" y="764">sidecar · AppRole otel-collector</text>
+  <text class="ts" x="780" y="780">renders the Authorization header</text>
+  <text class="ts" x="780" y="796">into tmpfs; Collector reads it via</text>
+  <text class="ts" x="780" y="812">${file:/secrets/…}</text>
+
+  <rect class="box" x="1092" y="724" width="314" height="110"/>
+  <text class="t" x="1106" y="746" font-weight="600">bao-agent-langfuse</text>
+  <text class="ts" x="1106" y="764">sidecar · AppRole langfuse-infra · renews token</text>
+  <text class="ts" x="1106" y="780">renders into tmpfs: langfuse.env, Postgres /</text>
+  <text class="ts" x="1106" y="796">ClickHouse / MinIO password files, redis.conf</text>
+  <text class="ts" x="1106" y="812">re-renders on change</text>
+
+  <path class="a-sec" d="M640,724 L640,612"/>
+  <text class="tl" x="646" y="690">keys</text>
+  <path class="a-sec" d="M990,724 L990,612"/>
+  <text class="tl" x="996" y="690">header file</text>
+  <path class="a-sec" d="M1370,724 L1370,612"/>
+  <text class="tl" x="1364" y="690" text-anchor="end">env + password files</text>
+
+  <rect class="box" x="390" y="852" width="1016" height="82"/>
+  <text class="t" x="404" y="874" font-weight="600">In production</text>
+  <text class="ts" x="404" y="894">Workload identity instead of AppRole secret_ids: Kubernetes auth (pod service account), AWS auth (IAM role), OIDC for CI and humans.</text>
+  <text class="ts" x="404" y="912">KMS auto-unseal, 3-5 Raft nodes, TLS everywhere, audit log to a SIEM, short token TTLs, dynamic credentials wherever an engine exists.</text>
+</svg>
+</div>
+
+<h2>Walkthrough</h2>
+<ol>
+  <li><b>Instrumentation.</b> In the same Python process as the agent, <code>observ/genai.py</code> patches the Anthropic SDK and the MCP client. Every run becomes a trace: <code>invoke_agent</code> at the root, a <code>chat</code> span per model request (model, tokens, cache hits, cost), a <code>tools/call</code> span per MCP tool call (arguments, result, errors). Trace context also travels inside MCP's <code>params._meta</code>.</li>
+  <li><b>Offline evals.</b> The runner asks the MCP tools for today's facts, builds golden cases, runs the agent's real entry point k times per case, rebuilds each trajectory from its spans, grades it with code and an LLM judge, writes reports and fails CI if a gate is missed.</li>
+  <li><b>Online evals.</b> A scheduled job samples real traces from Langfuse, judges them without a reference, and writes scores back. Low scores become new golden cases.</li>
+  <li><b>Collector.</b> The only thing apps talk to. It drops nothing under pressure, masks secrets, caps sizes, derives exact RED metrics for Prometheus, tail-samples, and forwards to Langfuse with a key it got from OpenBao.</li>
+  <li><b>Langfuse.</b> Stores traces in ClickHouse via an S3 event log and a Redis queue, links eval traces to the dataset as experiments, and holds every score.</li>
+  <li><b>OpenBao.</b> Holds every secret. Sidecars log in with their own AppRole and render secrets into memory-only volumes; the eval runner logs in itself. Nothing secret is in compose, config or git. The agent's own credentials stay in the lakehouse's OpenBao.</li>
+</ol>
+</main>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{{- with secret "secret/data/langfuse/infra" -}}
+# Password in a config file rather than on the command line, so it never shows up in `ps`.
+requirepass {{ .Data.data.redis_password }}
+maxmemory 192mb
+maxmemory-policy noeviction
+appendonly yes
+dir /data
+{{- end }}
